@@ -749,12 +749,16 @@
       currentSpread = 0;
       return renderSpreadToCache(0);
     }).then(function(dataUrl){
-      if (!dataUrl) return;
+      if (!dataUrl){
+        setStatus('The pages loaded but wouldn\u2019t render \u2014 this file may be scanned in an unusual way.<br><a href="' + book.url + '" target="_blank" rel="noopener">Open the original PDF instead</a>');
+        return;
+      }
       clearStatus();
       showSpread(dataUrl);
       updateControls();
       prefetch(1);
     }).catch(function(err){
+      console.error('Book failed to open:', err);
       setStatus('This book\u2019s host blocks outside access, and the free routes around it didn\u2019t get through this time (large files sometimes exceed their limits).<br><a href="' + book.url + '" target="_blank" rel="noopener">Open the original PDF instead</a>');
     });
   }
@@ -763,7 +767,7 @@
   // paste its URL here (e.g. "https://your-worker.your-name.workers.dev").
   // It gets tried first, before the public fallback proxies below — a
   // proxy you control is far more reliable than free shared ones.
-  var MY_PROXY = "jsbook.dinhdaniel2346.workers.dev/";
+  var MY_PROXY = "https://jsbook.dinhdaniel2346.workers.dev";
 
   var CORS_PROXIES = [
     function(u){ return "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u); },
