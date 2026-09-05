@@ -300,6 +300,7 @@
     max-height: 92vh;
     display:flex;
     flex-direction:column;
+    overflow:visible;
     transform: translateY(16px) scale(.97);
     opacity:0;
     transition: transform .4s cubic-bezier(.2,.8,.25,1), opacity .4s ease;
@@ -346,6 +347,8 @@
       0 20px 60px var(--shadow-deep);
     aspect-ratio: 3 / 4;
     max-height: 70vh;
+    min-height: 320px;
+    flex-shrink: 0;
     margin: 0 auto;
     overflow:hidden;
     perspective: 2200px;
