@@ -296,7 +296,7 @@
   .reader-overlay.open{ opacity:1; pointer-events:auto; }
 
   .book-frame{
-    width:min(92vw, 620px);
+    width:min(94vw, 880px);
     max-height: 92vh;
     display:flex;
     flex-direction:column;
@@ -342,21 +342,14 @@
     border-radius: 3px;
     box-shadow:
       0 0 0 1px rgba(0,0,0,.25),
-      6px 0 0 -1px #e4d6ae,
-      9px 0 0 -1px #d8c79b,
       0 20px 60px var(--shadow-deep);
-    aspect-ratio: 3 / 4;
+    aspect-ratio: 3 / 2;
     max-height: 70vh;
     min-height: 320px;
     flex-shrink: 0;
     margin: 0 auto;
     overflow:hidden;
     perspective: 2200px;
-  }
-  .book-spine-shadow{
-    position:absolute; top:0; bottom:0; left:0; width:26px;
-    background: linear-gradient(90deg, rgba(0,0,0,.35), transparent);
-    z-index:5; pointer-events:none;
   }
   .page-layer{
     position:absolute; inset:0;
@@ -482,7 +475,6 @@
       <button class="close-btn" id="closeReader" aria-label="Close book">✕</button>
     </div>
     <div class="book-body" id="bookBody">
-      <div class="book-spine-shadow"></div>
       <div class="page-layer" id="pageLayer"></div>
       <div class="reader-status" id="readerStatus" style="display:none;"></div>
     </div>
@@ -715,11 +707,11 @@
   var bookBody = document.getElementById('bookBody');
 
   var pdfDoc = null;
-  var currentPage = 1;
+  var currentSpread = 0;      // 0-indexed spread number
   var totalPages = 0;
-  var pageCache = {};      // pageNum -> dataURL
+  var totalSpreads = 0;
+  var spreadCache = {};       // spreadIndex -> dataURL (composite of 2 pages)
   var isFlipping = false;
-  var renderScale = 2;     // devicePixel-ish scale for crispness
 
   function setStatus(html){
     readerStatus.style.display = 'flex';
@@ -739,9 +731,10 @@
     document.body.style.overflow = 'hidden';
 
     pdfDoc = null;
-    currentPage = 1;
+    currentSpread = 0;
     totalPages = 0;
-    pageCache = {};
+    totalSpreads = 0;
+    spreadCache = {};
     updateControls();
 
     if (!window['pdfjsLib']){
@@ -752,14 +745,15 @@
     workerReady.then(function(){ return loadPdfWithFallbacks(book.url); }).then(function(doc){
       pdfDoc = doc;
       totalPages = doc.numPages;
-      currentPage = 1;
-      return renderPageToCache(1);
+      totalSpreads = Math.ceil(totalPages / 2);
+      currentSpread = 0;
+      return renderSpreadToCache(0);
     }).then(function(dataUrl){
       if (!dataUrl) return;
       clearStatus();
-      showPage(dataUrl);
+      showSpread(dataUrl);
       updateControls();
-      prefetch(2);
+      prefetch(1);
     }).catch(function(err){
       setStatus('This book\u2019s host blocks outside access, and the free routes around it didn\u2019t get through this time (large files sometimes exceed their limits).<br><a href="' + book.url + '" target="_blank" rel="noopener">Open the original PDF instead</a>');
     });
@@ -769,7 +763,7 @@
   // paste its URL here (e.g. "https://your-worker.your-name.workers.dev").
   // It gets tried first, before the public fallback proxies below — a
   // proxy you control is far more reliable than free shared ones.
-  var MY_PROXY = "https://jsbook.dinhdaniel2346.workers.dev/";
+  var MY_PROXY = "jsbook.dinhdaniel2346.workers.dev";
 
   var CORS_PROXIES = [
     function(u){ return "https://api.codetabs.com/v1/proxy?quest=" + encodeURIComponent(u); },
@@ -828,12 +822,12 @@
     }, 350);
   }
 
-  function renderPageToCache(num){
-    if (pageCache[num]) return Promise.resolve(pageCache[num]);
-    if (!pdfDoc) return Promise.resolve(null);
+  // Renders a single PDF page to a raw (un-encoded) canvas.
+  function renderPageToCanvas(num){
+    if (!pdfDoc || num < 1 || num > totalPages) return Promise.resolve(null);
     return pdfDoc.getPage(num).then(function(page){
       var viewport = page.getViewport({ scale: 1 });
-      var targetWidth = 900;
+      var targetWidth = 620;
       var scale = targetWidth / viewport.width;
       var scaledViewport = page.getViewport({ scale: scale });
 
@@ -842,35 +836,89 @@
       canvas.height = scaledViewport.height;
       var ctx = canvas.getContext('2d');
       ctx.fillStyle = "#f2e6c9";
-      ctx.fillRect(0,0,canvas.width, canvas.height);
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       return page.render({ canvasContext: ctx, viewport: scaledViewport }).promise.then(function(){
-        var dataUrl = canvas.toDataURL('image/jpeg', 0.86);
-        pageCache[num] = dataUrl;
-        return dataUrl;
+        return canvas;
       });
     }).catch(function(){ return null; });
   }
 
-  function prefetch(num){
-    if (num < 1 || num > totalPages) return;
-    renderPageToCache(num);
+  // Composes two facing pages (left, right) into one spread image, side by
+  // side with a shaded gutter down the middle — a real open-book look
+  // instead of one page at a time.
+  function renderSpreadToCache(spreadIndex){
+    if (spreadCache[spreadIndex]) return Promise.resolve(spreadCache[spreadIndex]);
+    if (!pdfDoc) return Promise.resolve(null);
+
+    var leftNum = spreadIndex * 2 + 1;
+    var rightNum = spreadIndex * 2 + 2;
+    if (leftNum > totalPages) return Promise.resolve(null);
+
+    return Promise.all([
+      renderPageToCanvas(leftNum),
+      rightNum <= totalPages ? renderPageToCanvas(rightNum) : Promise.resolve(null)
+    ]).then(function(results){
+      var leftCanvas = results[0];
+      var rightCanvas = results[1];
+      if (!leftCanvas) return null;
+
+      var gutter = 10;
+      var h = leftCanvas.height;
+      var rightW = rightCanvas ? rightCanvas.width : leftCanvas.width;
+      var w = leftCanvas.width + gutter + rightW;
+
+      var out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      var ctx = out.getContext('2d');
+      ctx.fillStyle = "#f2e6c9";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.drawImage(leftCanvas, 0, 0);
+      if (rightCanvas){
+        ctx.drawImage(rightCanvas, leftCanvas.width + gutter, 0);
+      }
+
+      // spine shading
+      var g = ctx.createLinearGradient(leftCanvas.width - 24, 0, leftCanvas.width + gutter + 24, 0);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(0.5, 'rgba(0,0,0,.22)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(leftCanvas.width - 24, 0, gutter + 48, h);
+
+      var dataUrl = out.toDataURL('image/jpeg', 0.86);
+      spreadCache[spreadIndex] = dataUrl;
+      return dataUrl;
+    });
   }
 
-  function showPage(dataUrl){
+  function prefetch(spreadIndex){
+    if (spreadIndex < 0 || spreadIndex >= totalSpreads) return;
+    renderSpreadToCache(spreadIndex);
+  }
+
+  function showSpread(dataUrl){
     pageLayer.innerHTML = '';
     var img = document.createElement('img');
     img.src = dataUrl;
-    img.alt = "Page " + currentPage;
+    img.alt = "Spread " + (currentSpread + 1);
     pageLayer.appendChild(img);
   }
 
+  function pageRangeLabel(spreadIndex){
+    var leftNum = spreadIndex * 2 + 1;
+    var rightNum = Math.min(spreadIndex * 2 + 2, totalPages);
+    return leftNum === rightNum ? ("Page " + leftNum) : ("Pages " + leftNum + "\u2013" + rightNum);
+  }
+
   function updateControls(){
-    prevBtn.disabled = (currentPage <= 1) || isFlipping || !pdfDoc;
-    nextBtn.disabled = (currentPage >= totalPages) || isFlipping || !pdfDoc;
+    prevBtn.disabled = (currentSpread <= 0) || isFlipping || !pdfDoc;
+    nextBtn.disabled = (currentSpread >= totalSpreads - 1) || isFlipping || !pdfDoc;
     if (totalPages){
-      progressLabel.textContent = "Page " + currentPage + " of " + totalPages;
-      progressFill.style.width = (currentPage / totalPages * 100) + "%";
+      progressLabel.textContent = pageRangeLabel(currentSpread) + " of " + totalPages;
+      progressFill.style.width = ((currentSpread + 1) / totalSpreads * 100) + "%";
     } else {
       progressLabel.textContent = "—";
       progressFill.style.width = "0%";
@@ -878,21 +926,21 @@
   }
 
   function flip(direction){
-    // direction: 1 = next, -1 = prev
+    // direction: 1 = next spread, -1 = previous spread
     if (isFlipping || !pdfDoc) return;
-    var targetPage = currentPage + direction;
-    if (targetPage < 1 || targetPage > totalPages) return;
+    var targetSpread = currentSpread + direction;
+    if (targetSpread < 0 || targetSpread >= totalSpreads) return;
 
     isFlipping = true;
     updateControls();
 
-    renderPageToCache(targetPage).then(function(targetUrl){
+    renderSpreadToCache(targetSpread).then(function(targetUrl){
       if (!targetUrl){
         isFlipping = false;
         updateControls();
         return;
       }
-      var currentUrl = pageCache[currentPage];
+      var currentUrl = spreadCache[currentSpread];
 
       var flipEl = document.createElement('div');
       flipEl.className = 'flip-page';
@@ -939,13 +987,13 @@
       function finish(){
         if (done) return;
         done = true;
-        currentPage = targetPage;
-        showPage(targetUrl);
+        currentSpread = targetSpread;
+        showSpread(targetUrl);
         if (flipEl.parentNode) flipEl.parentNode.removeChild(flipEl);
         isFlipping = false;
         updateControls();
-        prefetch(currentPage + direction);
-        prefetch(currentPage - direction);
+        prefetch(currentSpread + direction);
+        prefetch(currentSpread - direction);
       }
 
       flipEl.addEventListener('transitionend', finish);
