@@ -1,7 +1,7 @@
 {
-  Bookone: {
-    Name: "Diary Of a Wimpy Kid";
-    URL: "https://ia800606.us.archive.org/33/items/diaryofawimpykidbookseriesbyjeffkinney_202004/Diary%20of%20a%20wimpy%20kid%20book01.pdf";
-    Type: "PDF";
-  };
+  "Bookone": {
+    "Name": "Diary Of a Wimpy Kid",
+    "URL": "https://ia800606.us.archive.org/33/items/diaryofawimpykidbookseriesbyjeffkinney_202004/Diary%20of%20a%20wimpy%20kid%20book01.pdf",
+    "Type": "PDF"
+  }
 }
