@@ -351,17 +351,27 @@
     overflow:hidden;
     perspective: 2200px;
   }
-  .page-layer{
-    position:absolute; inset:0;
+  .page-slot{
+    position:absolute; top:0; bottom:0; width:50%;
     display:flex; align-items:center; justify-content:center;
     background: var(--paper);
+    overflow:hidden;
   }
-  .page-layer img{
+  .page-slot-left{ left:0; }
+  .page-slot-right{ left:50%; }
+  .page-slot img{
     width:100%; height:100%; object-fit:contain;
     -webkit-user-drag:none; user-select:none;
   }
-  .flip-page{
-    position:absolute; inset:0;
+  .page-gutter{
+    position:absolute; top:0; bottom:0; left:50%; width:22px;
+    transform: translateX(-50%);
+    background: linear-gradient(90deg, rgba(0,0,0,0), rgba(0,0,0,.25), rgba(0,0,0,0));
+    pointer-events:none;
+    z-index:4;
+  }
+  .flip-half{
+    position:absolute; top:0; bottom:0; width:50%;
     transform-style: preserve-3d;
     z-index: 10;
   }
@@ -373,7 +383,6 @@
     box-shadow: 0 0 24px rgba(0,0,0,.25) inset;
   }
   .flip-face img{ width:100%; height:100%; object-fit:contain; -webkit-user-drag:none; user-select:none; }
-  .flip-face.back{ transform: rotateY(180deg); }
 
   .reader-status{
     position:absolute; inset:0;
@@ -475,7 +484,9 @@
       <button class="close-btn" id="closeReader" aria-label="Close book">✕</button>
     </div>
     <div class="book-body" id="bookBody">
-      <div class="page-layer" id="pageLayer"></div>
+      <div class="page-slot page-slot-left" id="slotLeft"></div>
+      <div class="page-gutter"></div>
+      <div class="page-slot page-slot-right" id="slotRight"></div>
       <div class="reader-status" id="readerStatus" style="display:none;"></div>
     </div>
     <div class="book-controls">
@@ -697,7 +708,8 @@
 
   var overlay = document.getElementById('readerOverlay');
   var readerTitle = document.getElementById('readerTitle');
-  var pageLayer = document.getElementById('pageLayer');
+  var slotLeft = document.getElementById('slotLeft');
+  var slotRight = document.getElementById('slotRight');
   var readerStatus = document.getElementById('readerStatus');
   var prevBtn = document.getElementById('prevBtn');
   var nextBtn = document.getElementById('nextBtn');
@@ -707,10 +719,9 @@
   var bookBody = document.getElementById('bookBody');
 
   var pdfDoc = null;
-  var currentSpread = 0;      // 0-indexed spread number
+  var currentLeft = 1;        // page number currently shown in the left slot
   var totalPages = 0;
-  var totalSpreads = 0;
-  var spreadCache = {};       // spreadIndex -> dataURL (composite of 2 pages)
+  var pageCache = {};         // pageNum -> dataURL
   var isFlipping = false;
 
   function setStatus(html){
@@ -724,17 +735,17 @@
 
   function openReader(book){
     readerTitle.textContent = book.name;
-    pageLayer.innerHTML = '';
+    slotLeft.innerHTML = '';
+    slotRight.innerHTML = '';
     clearStatus();
     setStatus('<div class="spinner"></div><div>Opening ' + escapeHtml(book.name) + '…</div>');
     overlay.classList.add('open');
     document.body.style.overflow = 'hidden';
 
     pdfDoc = null;
-    currentSpread = 0;
+    currentLeft = 1;
     totalPages = 0;
-    totalSpreads = 0;
-    spreadCache = {};
+    pageCache = {};
     updateControls();
 
     if (!window['pdfjsLib']){
@@ -745,18 +756,18 @@
     workerReady.then(function(){ return loadPdfWithFallbacks(book.url); }).then(function(doc){
       pdfDoc = doc;
       totalPages = doc.numPages;
-      totalSpreads = Math.ceil(totalPages / 2);
-      currentSpread = 0;
-      return renderSpreadToCache(0);
-    }).then(function(dataUrl){
-      if (!dataUrl){
+      currentLeft = 1;
+      return Promise.all([renderPageToCache(1), renderPageToCache(2)]);
+    }).then(function(results){
+      if (!results[0]){
         setStatus('The pages loaded but wouldn\u2019t render \u2014 this file may be scanned in an unusual way.<br><a href="' + book.url + '" target="_blank" rel="noopener">Open the original PDF instead</a>');
         return;
       }
       clearStatus();
-      showSpread(dataUrl);
+      setSlot(slotLeft, results[0]);
+      setSlot(slotRight, results[1]);
       updateControls();
-      prefetch(1);
+      prefetch(3);
     }).catch(function(err){
       console.error('Book failed to open:', err);
       setStatus('This book\u2019s host blocks outside access, and the free routes around it didn\u2019t get through this time (large files sometimes exceed their limits).<br><a href="' + book.url + '" target="_blank" rel="noopener">Open the original PDF instead</a>');
@@ -825,16 +836,21 @@
     setTimeout(function(){
       if (pdfDoc && pdfDoc.destroy) pdfDoc.destroy();
       pdfDoc = null;
-      pageLayer.innerHTML = '';
+      slotLeft.innerHTML = '';
+      slotRight.innerHTML = '';
     }, 350);
   }
 
-  // Renders a single PDF page to a raw (un-encoded) canvas.
-  function renderPageToCanvas(num){
-    if (!pdfDoc || num < 1 || num > totalPages) return Promise.resolve(null);
+  // Renders one PDF page to a cached dataURL. Returns null (via the cache
+  // holding null) for out-of-range page numbers, e.g. the very last page
+  // of a book with an odd page count, so the right slot can go blank.
+  function renderPageToCache(num){
+    if (num < 1 || num > totalPages) return Promise.resolve(null);
+    if (pageCache.hasOwnProperty(num)) return Promise.resolve(pageCache[num]);
+    if (!pdfDoc) return Promise.resolve(null);
     return pdfDoc.getPage(num).then(function(page){
       var viewport = page.getViewport({ scale: 1 });
-      var targetWidth = 620;
+      var targetWidth = 700;
       var scale = targetWidth / viewport.width;
       var scaledViewport = page.getViewport({ scale: scale });
 
@@ -846,166 +862,172 @@
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       return page.render({ canvasContext: ctx, viewport: scaledViewport }).promise.then(function(){
-        return canvas;
+        var dataUrl = canvas.toDataURL('image/jpeg', 0.86);
+        pageCache[num] = dataUrl;
+        return dataUrl;
       });
-    }).catch(function(){ return null; });
+    }).catch(function(){ pageCache[num] = null; return null; });
   }
 
-  // Composes two facing pages (left, right) into one spread image, side by
-  // side with a shaded gutter down the middle — a real open-book look
-  // instead of one page at a time.
-  function renderSpreadToCache(spreadIndex){
-    if (spreadCache[spreadIndex]) return Promise.resolve(spreadCache[spreadIndex]);
-    if (!pdfDoc) return Promise.resolve(null);
-
-    var leftNum = spreadIndex * 2 + 1;
-    var rightNum = spreadIndex * 2 + 2;
-    if (leftNum > totalPages) return Promise.resolve(null);
-
-    return Promise.all([
-      renderPageToCanvas(leftNum),
-      rightNum <= totalPages ? renderPageToCanvas(rightNum) : Promise.resolve(null)
-    ]).then(function(results){
-      var leftCanvas = results[0];
-      var rightCanvas = results[1];
-      if (!leftCanvas) return null;
-
-      var gutter = 10;
-      var h = leftCanvas.height;
-      var rightW = rightCanvas ? rightCanvas.width : leftCanvas.width;
-      var w = leftCanvas.width + gutter + rightW;
-
-      var out = document.createElement('canvas');
-      out.width = w;
-      out.height = h;
-      var ctx = out.getContext('2d');
-      ctx.fillStyle = "#f2e6c9";
-      ctx.fillRect(0, 0, w, h);
-
-      ctx.drawImage(leftCanvas, 0, 0);
-      if (rightCanvas){
-        ctx.drawImage(rightCanvas, leftCanvas.width + gutter, 0);
-      }
-
-      // spine shading
-      var g = ctx.createLinearGradient(leftCanvas.width - 24, 0, leftCanvas.width + gutter + 24, 0);
-      g.addColorStop(0, 'rgba(0,0,0,0)');
-      g.addColorStop(0.5, 'rgba(0,0,0,.22)');
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = g;
-      ctx.fillRect(leftCanvas.width - 24, 0, gutter + 48, h);
-
-      var dataUrl = out.toDataURL('image/jpeg', 0.86);
-      spreadCache[spreadIndex] = dataUrl;
-      return dataUrl;
-    });
+  function prefetch(num){
+    if (num < 1 || num > totalPages) return;
+    renderPageToCache(num);
   }
 
-  function prefetch(spreadIndex){
-    if (spreadIndex < 0 || spreadIndex >= totalSpreads) return;
-    renderSpreadToCache(spreadIndex);
-  }
-
-  function showSpread(dataUrl){
-    pageLayer.innerHTML = '';
+  // Fills a slot with a page image, or leaves it blank paper if the page
+  // number doesn't exist (e.g. past the last odd page of the book).
+  function setSlot(slotEl, dataUrl){
+    slotEl.innerHTML = '';
+    if (!dataUrl) return;
     var img = document.createElement('img');
     img.src = dataUrl;
-    img.alt = "Spread " + (currentSpread + 1);
-    pageLayer.appendChild(img);
-  }
-
-  function pageRangeLabel(spreadIndex){
-    var leftNum = spreadIndex * 2 + 1;
-    var rightNum = Math.min(spreadIndex * 2 + 2, totalPages);
-    return leftNum === rightNum ? ("Page " + leftNum) : ("Pages " + leftNum + "\u2013" + rightNum);
+    slotEl.appendChild(img);
   }
 
   function updateControls(){
-    prevBtn.disabled = (currentSpread <= 0) || isFlipping || !pdfDoc;
-    nextBtn.disabled = (currentSpread >= totalSpreads - 1) || isFlipping || !pdfDoc;
+    var rightNum = currentLeft + 1;
+    prevBtn.disabled = (currentLeft <= 1) || isFlipping || !pdfDoc;
+    nextBtn.disabled = (rightNum >= totalPages) || isFlipping || !pdfDoc || rightNum > totalPages;
     if (totalPages){
-      progressLabel.textContent = pageRangeLabel(currentSpread) + " of " + totalPages;
-      progressFill.style.width = ((currentSpread + 1) / totalSpreads * 100) + "%";
+      var shownRight = Math.min(rightNum, totalPages);
+      progressLabel.textContent = (currentLeft === shownRight ? ("Page " + currentLeft) : ("Pages " + currentLeft + "\u2013" + shownRight)) + " of " + totalPages;
+      progressFill.style.width = (shownRight / totalPages * 100) + "%";
     } else {
       progressLabel.textContent = "—";
       progressFill.style.width = "0%";
     }
   }
 
+  // Flips exactly one leaf, hinged at the spine (center), like a real book —
+  // not the whole spread. Forward: the right page lifts and turns left,
+  // landing as the new left page, while the next page slides into the right
+  // slot underneath. Backward is the mirror image of that.
   function flip(direction){
-    // direction: 1 = next spread, -1 = previous spread
     if (isFlipping || !pdfDoc) return;
-    var targetSpread = currentSpread + direction;
-    if (targetSpread < 0 || targetSpread >= totalSpreads) return;
 
-    isFlipping = true;
-    updateControls();
+    if (direction === 1){
+      var oldRight = currentLeft + 1;
+      if (oldRight > totalPages) return;
+      var newLeft = oldRight + 1;
+      var newRight = newLeft + 1;
 
-    renderSpreadToCache(targetSpread).then(function(targetUrl){
-      if (!targetUrl){
-        isFlipping = false;
-        updateControls();
-        return;
-      }
-      var currentUrl = spreadCache[currentSpread];
+      isFlipping = true;
+      updateControls();
 
-      var flipEl = document.createElement('div');
-      flipEl.className = 'flip-page';
-      flipEl.style.transformOrigin = direction === 1 ? 'left center' : 'right center';
-      flipEl.style.transform = 'rotateY(0deg)';
-      flipEl.style.transition = 'transform .68s cubic-bezier(.45,.05,.35,1)';
+      Promise.all([renderPageToCache(oldRight), renderPageToCache(newLeft)]).then(function(res){
+        var frontUrl = res[0], backUrl = res[1];
+        if (!frontUrl){ isFlipping = false; updateControls(); return; }
 
-      var front = document.createElement('div');
-      front.className = 'flip-face front';
-      var frontImg = document.createElement('img');
-      frontImg.src = currentUrl;
-      front.appendChild(frontImg);
+        // reveal the next right-hand page as soon as the flap clears it
+        renderPageToCache(newRight).then(function(nextRightUrl){ setSlot(slotRight, nextRightUrl); });
 
-      var back = document.createElement('div');
-      back.className = 'flip-face back';
-      back.style.transform = direction === 1 ? 'rotateY(180deg) scaleX(-1)' : 'rotateY(-180deg) scaleX(-1)';
-      var backImg = document.createElement('img');
-      backImg.src = targetUrl;
-      back.appendChild(backImg);
-
-      flipEl.appendChild(front);
-      flipEl.appendChild(back);
-
-      // shading overlay for depth during the turn
-      var shade = document.createElement('div');
-      shade.style.position = 'absolute';
-      shade.style.inset = '0';
-      shade.style.background = 'linear-gradient(90deg, rgba(0,0,0,.28), transparent 40%)';
-      shade.style.opacity = '0';
-      shade.style.transition = 'opacity .68s ease';
-      shade.style.pointerEvents = 'none';
-      flipEl.appendChild(shade);
-
-      bookBody.appendChild(flipEl);
-
-      requestAnimationFrame(function(){
-        requestAnimationFrame(function(){
-          flipEl.style.transform = direction === 1 ? 'rotateY(-180deg)' : 'rotateY(180deg)';
-          shade.style.opacity = '1';
+        runFlip({
+          hingeSide: 'left',      // flap's own left edge sits on the spine
+          slotSide: 'right',      // flap starts positioned over the right slot
+          rotateTo: -180,
+          frontUrl: frontUrl,
+          backUrl: backUrl,
+          onDone: function(){
+            currentLeft = newLeft;
+            setSlot(slotLeft, backUrl);
+            isFlipping = false;
+            updateControls();
+            prefetch(newRight + 1);
+          }
         });
       });
 
-      var done = false;
-      function finish(){
-        if (done) return;
-        done = true;
-        currentSpread = targetSpread;
-        showSpread(targetUrl);
-        if (flipEl.parentNode) flipEl.parentNode.removeChild(flipEl);
-        isFlipping = false;
-        updateControls();
-        prefetch(currentSpread + direction);
-        prefetch(currentSpread - direction);
-      }
+    } else {
+      if (currentLeft <= 1) return;
+      var oldLeft = currentLeft;
+      var newRight2 = oldLeft - 1;
+      var newLeft2 = newRight2 - 1;
+      if (newLeft2 < 1) return;
 
-      flipEl.addEventListener('transitionend', finish);
-      setTimeout(finish, 820); // safety net
+      isFlipping = true;
+      updateControls();
+
+      Promise.all([renderPageToCache(oldLeft), renderPageToCache(newRight2)]).then(function(res){
+        var frontUrl = res[0], backUrl = res[1];
+        if (!frontUrl){ isFlipping = false; updateControls(); return; }
+
+        renderPageToCache(newLeft2).then(function(nextLeftUrl){ setSlot(slotLeft, nextLeftUrl); });
+
+        runFlip({
+          hingeSide: 'right',     // flap's own right edge sits on the spine
+          slotSide: 'left',       // flap starts positioned over the left slot
+          rotateTo: 180,
+          frontUrl: frontUrl,
+          backUrl: backUrl,
+          onDone: function(){
+            currentLeft = newLeft2;
+            setSlot(slotRight, backUrl);
+            isFlipping = false;
+            updateControls();
+            prefetch(newLeft2 - 1);
+          }
+        });
+      });
+    }
+  }
+
+  // Builds and animates the single flapping half-page.
+  function runFlip(opts){
+    var flapEl = document.createElement('div');
+    flapEl.className = 'flip-half';
+    flapEl.style.left = opts.slotSide === 'left' ? '0' : '50%';
+    flapEl.style.transformOrigin = opts.hingeSide === 'left' ? 'left center' : 'right center';
+    flapEl.style.transform = 'rotateY(0deg)';
+    flapEl.style.transition = 'transform .62s cubic-bezier(.45,.05,.35,1)';
+
+    var front = document.createElement('div');
+    front.className = 'flip-face front';
+    var frontImg = document.createElement('img');
+    frontImg.src = opts.frontUrl;
+    front.appendChild(frontImg);
+
+    var back = document.createElement('div');
+    back.className = 'flip-face back';
+    back.style.transform = 'rotateY(' + (opts.rotateTo > 0 ? -180 : 180) + 'deg)';
+    if (opts.backUrl){
+      var backImg = document.createElement('img');
+      backImg.src = opts.backUrl;
+      back.appendChild(backImg);
+    }
+
+    flapEl.appendChild(front);
+    flapEl.appendChild(back);
+
+    var shade = document.createElement('div');
+    shade.style.position = 'absolute';
+    shade.style.inset = '0';
+    shade.style.background = opts.hingeSide === 'left'
+      ? 'linear-gradient(90deg, rgba(0,0,0,.32), transparent 55%)'
+      : 'linear-gradient(270deg, rgba(0,0,0,.32), transparent 55%)';
+    shade.style.opacity = '0';
+    shade.style.transition = 'opacity .62s ease';
+    shade.style.pointerEvents = 'none';
+    flapEl.appendChild(shade);
+
+    bookBody.appendChild(flapEl);
+
+    requestAnimationFrame(function(){
+      requestAnimationFrame(function(){
+        flapEl.style.transform = 'rotateY(' + opts.rotateTo + 'deg)';
+        shade.style.opacity = '1';
+      });
     });
+
+    var done = false;
+    function finish(){
+      if (done) return;
+      done = true;
+      if (flapEl.parentNode) flapEl.parentNode.removeChild(flapEl);
+      opts.onDone();
+    }
+
+    flapEl.addEventListener('transitionend', finish);
+    setTimeout(finish, 760); // safety net
   }
 
   prevBtn.addEventListener('click', function(){ flip(-1); });
